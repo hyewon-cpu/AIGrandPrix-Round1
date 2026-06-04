@@ -316,6 +316,15 @@ class MavlinkDepthGateRacer:
             "linear_velocity": np.asarray(local_position["linear_velocity"], dtype=np.float32),
         }
 
+    def estimate_closest_gate_position(self, state, gate_target_v, env_rot):
+        if gate_target_v is None:
+            return None, None
+        drone_position = np.asarray(state["position"], dtype=np.float32)
+        gate_delta_normal_world = env_rot @ np.asarray(gate_target_v, dtype=np.float32)
+        gate_delta_ned = sim_to_normal(gate_delta_normal_world)
+        gate_position = drone_position + gate_delta_ned
+        return gate_position, float(np.linalg.norm(gate_delta_ned))
+
     def preprocess_depth(self, depth):
         depth = depth.copy()
         depth[~np.isfinite(depth)] = 24.0
@@ -865,11 +874,11 @@ class MavlinkDepthGateRacer:
         )
         aux = aux or {}
         target_rel_drone = aux.get("gate_detection_target_rel_drone", target_v_airsim)
+        gate_model_aux = aux.get("gate_model_aux", aux)
         if target_rel_drone is None:
             target_v = None
         else:
             target_v = airsim_to_normal_vector(target_rel_drone)
-            gate_model_aux = aux.get("gate_model_aux", aux)
         gate_center = gate_model_aux.get("gate_center_px") if isinstance(gate_model_aux, dict) else None
 
         with self._sensor_cond:
@@ -972,6 +981,11 @@ class MavlinkDepthGateRacer:
             env_target_v = env_rot @ raw_target_v
             local_target_v = env_target_v @ yaw_only_rot
             target_v_from_local = lambda vec: vec @ yaw_only_rot.T
+        closest_gate_position, closest_gate_distance = self.estimate_closest_gate_position(
+            state,
+            target_v_snapshot if target_info_snapshot.get("source") == "gate" else None,
+            env_rot,
+        )
         target_v_norm = np.linalg.norm(local_target_v)
         if target_v_norm > 1e-6:
             if self.args.target_type == "max":
@@ -1008,8 +1022,13 @@ class MavlinkDepthGateRacer:
 
         if self.args.debug_print:
             print(
-                "[control]",
+                "[debug]",
                 "depth_input=", "infinite",
+                "drone_position=", np.round(state["position"], 3),
+                "closest_gate_position=",
+                None if closest_gate_position is None else np.round(closest_gate_position, 3),
+                "closest_gate_distance=",
+                None if closest_gate_distance is None else round(closest_gate_distance, 3),
                 "attitude_rpy=", np.round(current_rpy, 3),
                 "raw_target_v=", np.round(raw_target_v, 3),
                 "local_target_v=", np.round(local_target_v, 3),
@@ -1163,6 +1182,11 @@ class MavlinkDepthGateRacer:
             env_target_v = env_rot @ raw_target_v
             local_target_v = env_target_v @ yaw_only_rot
             target_v_from_local = lambda vec: vec @ yaw_only_rot.T
+        closest_gate_position, closest_gate_distance = self.estimate_closest_gate_position(
+            state,
+            raw_target_v if target_source == "gate" else None,
+            env_rot,
+        )
         target_v_norm = np.linalg.norm(local_target_v)
         if target_v_norm > 1e-6:
             if self.args.target_type == "max":
@@ -1199,8 +1223,13 @@ class MavlinkDepthGateRacer:
 
         if self.args.debug_print:
             print(
-                "[control]",
+                "[debug]",
                 "depth_input=", "infinite",
+                "drone_position=", np.round(state["position"], 3),
+                "closest_gate_position=",
+                None if closest_gate_position is None else np.round(closest_gate_position, 3),
+                "closest_gate_distance=",
+                None if closest_gate_distance is None else round(closest_gate_distance, 3),
                 "attitude_rpy=", np.round(current_rpy, 3),
                 "raw_target_v=", np.round(raw_target_v, 3),
                 "local_target_v=", np.round(local_target_v, 3),

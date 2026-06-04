@@ -13,10 +13,7 @@ import torch
 import torch.nn as nn
 import ctypes
 
-try:
-    import airsimdroneracinglab as airsim
-except ImportError:  # MAVLink simulator does not provide the AirSim Python API.
-    airsim = None
+
 
 
 def load_trusted_torch_checkpoint(path, map_location):
