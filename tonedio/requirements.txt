@@ -1,0 +1,13 @@
+# Runtime dependencies for tonedio/mavlink_depth_gate_racer.py
+#
+# Install PyTorch from https://pytorch.org/get-started/locally/ if this
+# generic wheel does not match your Python / CUDA setup.
+torch
+
+# MAVLink telemetry/control
+pymavlink
+
+# Image/depth/gate processing
+numpy
+opencv-python
+onnxruntime

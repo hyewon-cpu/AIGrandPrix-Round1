@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from pymavlink import mavutil
 
 from tonedio.mavlink_rx import MAVLinkRX
-from timesync import TimeSync
+from example.timesync import TimeSync
 from tonedio.utils import (
     DepthAnythingOnnxEstimator,
     DiffPhysModel,
@@ -315,15 +315,6 @@ class MavlinkDepthGateRacer:
             "orientation": np.asarray(euler_to_quaternion(roll, pitch, yaw), dtype=np.float32),
             "linear_velocity": np.asarray(local_position["linear_velocity"], dtype=np.float32),
         }
-
-    def estimate_closest_gate_position(self, state, gate_target_v, env_rot):
-        if gate_target_v is None:
-            return None, None
-        drone_position = np.asarray(state["position"], dtype=np.float32)
-        gate_delta_normal_world = env_rot @ np.asarray(gate_target_v, dtype=np.float32)
-        gate_delta_ned = sim_to_normal(gate_delta_normal_world)
-        gate_position = drone_position + gate_delta_ned
-        return gate_position, float(np.linalg.norm(gate_delta_ned))
 
     def preprocess_depth(self, depth):
         depth = depth.copy()
@@ -981,11 +972,6 @@ class MavlinkDepthGateRacer:
             env_target_v = env_rot @ raw_target_v
             local_target_v = env_target_v @ yaw_only_rot
             target_v_from_local = lambda vec: vec @ yaw_only_rot.T
-        closest_gate_position, closest_gate_distance = self.estimate_closest_gate_position(
-            state,
-            target_v_snapshot if target_info_snapshot.get("source") == "gate" else None,
-            env_rot,
-        )
         target_v_norm = np.linalg.norm(local_target_v)
         if target_v_norm > 1e-6:
             if self.args.target_type == "max":
@@ -1025,10 +1011,7 @@ class MavlinkDepthGateRacer:
                 "[debug]",
                 "depth_input=", "infinite",
                 "drone_position=", np.round(state["position"], 3),
-                "closest_gate_position=",
-                None if closest_gate_position is None else np.round(closest_gate_position, 3),
-                "closest_gate_distance=",
-                None if closest_gate_distance is None else round(closest_gate_distance, 3),
+                "target_src=", target_source,
                 "attitude_rpy=", np.round(current_rpy, 3),
                 "raw_target_v=", np.round(raw_target_v, 3),
                 "local_target_v=", np.round(local_target_v, 3),
@@ -1096,7 +1079,20 @@ class MavlinkDepthGateRacer:
                 thread.join(timeout=1.0)
 
     def debug_idle(self, reason, frame=None, state=None):
-        return
+        if not self.args.debug_print:
+            return
+        now = time.time()
+        if now - self.last_idle_debug_time < 1.0:
+            return
+        self.last_idle_debug_time = now
+        print(
+            "[debug_idle]",
+            "reason=", reason,
+            "has_frame=", frame is not None,
+            "has_state=", state is not None,
+            "has_attitude=", self.data.get("attitude") is not None,
+            flush=True,
+        )
 
     def update(self):
         frame = self.data.get("latest_frame")
@@ -1182,11 +1178,6 @@ class MavlinkDepthGateRacer:
             env_target_v = env_rot @ raw_target_v
             local_target_v = env_target_v @ yaw_only_rot
             target_v_from_local = lambda vec: vec @ yaw_only_rot.T
-        closest_gate_position, closest_gate_distance = self.estimate_closest_gate_position(
-            state,
-            raw_target_v if target_source == "gate" else None,
-            env_rot,
-        )
         target_v_norm = np.linalg.norm(local_target_v)
         if target_v_norm > 1e-6:
             if self.args.target_type == "max":
@@ -1226,10 +1217,7 @@ class MavlinkDepthGateRacer:
                 "[debug]",
                 "depth_input=", "infinite",
                 "drone_position=", np.round(state["position"], 3),
-                "closest_gate_position=",
-                None if closest_gate_position is None else np.round(closest_gate_position, 3),
-                "closest_gate_distance=",
-                None if closest_gate_distance is None else round(closest_gate_distance, 3),
+                "target_src=", target_source,
                 "attitude_rpy=", np.round(current_rpy, 3),
                 "raw_target_v=", np.round(raw_target_v, 3),
                 "local_target_v=", np.round(local_target_v, 3),
@@ -1255,11 +1243,12 @@ def main():
     system_boot_ms = int(time.time() * 1000)
 
     sim_conn = mavutil.mavlink_connection(f"udpin:{args.server_ip}:{args.server_udp_port}")
+    mavlink_rx = MAVLinkRX.create_mavlink_rx(sim_conn, shared_data)
     print("Waiting for heartbeat...", flush=True)
-    sim_conn.wait_heartbeat()
+    if not mavlink_rx.wait_heartbeat(timeout=10.0):
+        raise TimeoutError("Timed out waiting for MAVLink heartbeat.")
     print(f"Connected to system: {sim_conn.target_system}", flush=True)
 
-    mavlink_rx = MAVLinkRX.create_mavlink_rx(sim_conn, shared_data)
     ts_loop = TimeSync.create_timesync(sim_conn, shared_data)
     vision_rx = VisionRX(shared_data)
     print("Loading depth, gate, and control models...", flush=True)

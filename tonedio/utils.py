@@ -123,9 +123,7 @@ class GateDetector:
         self._gate_target_debug_counter= 0
         self.camera_intrinsics = None
         self.airsim_client_images = None
-        if airsim is not None:
-            self.airsim_client_images = airsim.MultirotorClient()
-            self.airsim_client_images.confirmConnection()
+        
         self.drone_name = drone_name
         self.camera_fov_degrees = float(camera_fov_degrees)
         self.fixed_camera_intrinsics = None
