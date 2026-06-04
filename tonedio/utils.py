@@ -14,7 +14,7 @@ import torch.nn as nn
 import ctypes
 
 
-
+"""Models and utilities for gate detection, depth estimation, and control"""
 
 def load_trusted_torch_checkpoint(path, map_location):
     try:
@@ -22,26 +22,82 @@ def load_trusted_torch_checkpoint(path, map_location):
     except TypeError:
         return torch.load(path, map_location=map_location)
 
+CORNER_NAMES = ("TL", "TR", "BL", "BR")
+EDGE_TYPES = (("TL", "TR"), ("TR", "BR"), ("BR", "BL"), ("BL", "TL"))
+
+
+class ConvLayer(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int):
+        super().__init__()
+        padding = kernel_size // 2
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                padding=padding,
+                bias=True,
+            ),
+            nn.LeakyReLU(negative_slope=0.01, inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class CornerUNet(nn.Module):
+    """5-level U-Net with fixed per-level widths and kernel sizes."""
+
+    def __init__(self, in_channels: int = 3, out_channels: int = 12):
+        super().__init__()
+        enc_channels = [12, 18, 24, 32, 32]
+        enc_kernels = [3, 3, 3, 5, 7]
+
+        self.enc1 = ConvLayer(in_channels, enc_channels[0], enc_kernels[0])
+        self.pool1 = nn.MaxPool2d(2)
+        self.enc2 = ConvLayer(enc_channels[0], enc_channels[1], enc_kernels[1])
+        self.pool2 = nn.MaxPool2d(2)
+        self.enc3 = ConvLayer(enc_channels[1], enc_channels[2], enc_kernels[2])
+        self.pool3 = nn.MaxPool2d(2)
+        self.enc4 = ConvLayer(enc_channels[2], enc_channels[3], enc_kernels[3])
+        self.pool4 = nn.MaxPool2d(2)
+        self.enc5 = ConvLayer(enc_channels[3], enc_channels[4], enc_kernels[4])
+
+        self.up4 = nn.ConvTranspose2d(enc_channels[4], enc_channels[3], kernel_size=2, stride=2)
+        self.dec4 = ConvLayer(enc_channels[3] * 2, enc_channels[3], enc_kernels[3])
+        self.up3 = nn.ConvTranspose2d(enc_channels[3], enc_channels[2], kernel_size=2, stride=2)
+        self.dec3 = ConvLayer(enc_channels[2] * 2, enc_channels[2], enc_kernels[2])
+        self.up2 = nn.ConvTranspose2d(enc_channels[2], enc_channels[1], kernel_size=2, stride=2)
+        self.dec2 = ConvLayer(enc_channels[1] * 2, enc_channels[1], enc_kernels[1])
+        self.up1 = nn.ConvTranspose2d(enc_channels[1], enc_channels[0], kernel_size=2, stride=2)
+        self.dec1 = ConvLayer(enc_channels[0] * 2, enc_channels[0], enc_kernels[0])
+
+        # Final additional 12-filter layer on top of the U-Net output.
+        self.refine = ConvLayer(enc_channels[0], 12, kernel_size=3)
+        self.head = nn.Conv2d(12, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool1(e1))
+        e3 = self.enc3(self.pool2(e2))
+        e4 = self.enc4(self.pool3(e3))
+        e5 = self.enc5(self.pool4(e4))
+
+        d4 = self.up4(e5)
+        d4 = self.dec4(torch.cat([d4, e4], dim=1))
+        d3 = self.up3(d4)
+        d3 = self.dec3(torch.cat([d3, e3], dim=1))
+        d2 = self.up2(d3)
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))
+        d1 = self.refine(d1)
+        return self.head(d1)
 
 
 
 
-try:
-    from .train_corner_affinity_detection import (
-        CORNER_NAMES,
-        EDGE_TYPES,
-        assemble_gates_from_edges,
-        extract_corner_candidates,
-        score_and_match_edges,
-    )
-except ImportError:
-    from train_corner_affinity_detection import (
-        CORNER_NAMES,
-        EDGE_TYPES,
-        assemble_gates_from_edges,
-        extract_corner_candidates,
-        score_and_match_edges,
-    )
+
 
 class GateDetector:
     def __init__(self, 
@@ -68,11 +124,6 @@ class GateDetector:
                  load_airsim_camera_settings=True):
         
        
-
-        try:
-            from .corner_unet import CornerUNet
-        except ImportError:
-            from corner_unet import CornerUNet
 
         checkpoint_path = Path(checkpoint_path).expanduser().resolve()
         if not checkpoint_path.exists():
@@ -145,6 +196,281 @@ class GateDetector:
         if camera_pose:
             self.camera_pose.update(camera_pose)
         self.load_airsim_camera_settings = bool(load_airsim_camera_settings)
+
+    def assemble_gates_from_edges(self,
+        edge_matches: dict[tuple[str, str], list[tuple[dict, dict, float]]] ) -> list[dict]:
+        """Assemble TL/TR/BR/BL quads by finding consistent cycles in matched edges."""
+
+        # Build forward maps keyed by start-candidate identity.
+        tl_to_tr = {id(a): (b, s) for a, b, s in edge_matches.get(("TL", "TR"), [])}
+        tr_to_br = {id(a): (b, s) for a, b, s in edge_matches.get(("TR", "BR"), [])}
+        br_to_bl = {id(a): (b, s) for a, b, s in edge_matches.get(("BR", "BL"), [])}
+        bl_to_tl = {id(a): (b, s) for a, b, s in edge_matches.get(("BL", "TL"), [])}
+
+        gates: list[dict] = []
+        for tl_id, (tr, s1) in tl_to_tr.items():
+            tr_id = id(tr)
+            if tr_id not in tr_to_br:
+                continue
+            br, s2 = tr_to_br[tr_id]
+            br_id = id(br)
+            if br_id not in br_to_bl:
+                continue
+            bl, s3 = br_to_bl[br_id]
+            bl_id = id(bl)
+            if bl_id not in bl_to_tl:
+                continue
+            tl2, s4 = bl_to_tl[bl_id]
+            if id(tl2) != tl_id:
+                continue
+
+            # Recover the actual tl object via any stored tuple.
+            tl_obj = None
+            for a, b, _s in edge_matches.get(("TL", "TR"), []):
+                if id(a) == tl_id:
+                    tl_obj = a
+                    break
+            if tl_obj is None:
+                continue
+
+            points = {
+                "TL": (float(tl_obj["x"]), float(tl_obj["y"])),
+                "TR": (float(tr["x"]), float(tr["y"])),
+                "BR": (float(br["x"]), float(br["y"])),
+                "BL": (float(bl["x"]), float(bl["y"])),
+            }
+            scores = {
+                "TL": float(tl_obj["score"]),
+                "TR": float(tr["score"]),
+                "BR": float(br["score"]),
+                "BL": float(bl["score"]),
+            }
+            edge_scores = {"TL_TR": float(s1), "TR_BR": float(s2), "BR_BL": float(s3), "BL_TL": float(s4)}
+            gate_score = float(np.mean(list(scores.values()))) + 0.5 * float(np.mean(list(edge_scores.values())))
+            gates.append({"points": points, "scores": scores, "edge_scores": edge_scores, "gate_score": gate_score})
+
+        gates.sort(key=lambda g: float(g.get("gate_score", 0.0)), reverse=True)
+        return gates
+
+    def extract_corner_candidates(self, corner_heatmaps: np.ndarray,*,threshold: float,topk: int,nms_radius: int,) -> dict[str, list[dict]]:
+        """Return per-corner-type candidate points extracted from heatmaps."""
+        if corner_heatmaps.ndim != 3 or corner_heatmaps.shape[0] != 4:
+            raise ValueError(f"Expected corner heatmaps with shape (4,H,W), got {corner_heatmaps.shape}")
+        threshold = float(threshold)
+        topk = max(1, int(topk))
+        nms_radius = max(0, int(nms_radius))
+
+        hmaps_t = torch.from_numpy(corner_heatmaps).float()
+        out: dict[str, list[dict]] = {name: [] for name in CORNER_NAMES}
+        for idx, name in enumerate(CORNER_NAMES):
+            hmap = hmaps_t[idx]
+            if nms_radius > 0:
+                pooled = torch.nn.functional.max_pool2d(
+                    hmap[None, None, ...],
+                    kernel_size=2 * nms_radius + 1,
+                    stride=1,
+                    padding=nms_radius,
+                )[0, 0]
+                mask = (hmap >= pooled) & (hmap >= threshold)
+            else:
+                mask = hmap >= threshold
+
+            ys, xs = torch.nonzero(mask, as_tuple=True)
+            if ys.numel() == 0:
+                continue
+            scores = hmap[ys, xs]
+            order = torch.argsort(scores, descending=True)
+            if order.numel() > topk:
+                order = order[:topk]
+
+            candidates: list[dict] = []
+            for rank, k in enumerate(order.tolist()):
+                candidates.append(
+                    {
+                        "id": int(rank),  # local id per corner type (stable enough for matching)
+                        "x": float(xs[k].item()),
+                        "y": float(ys[k].item()),
+                        "score": float(scores[k].item()),
+                    }
+                )
+            out[name] = candidates
+        return out
+    
+    def score_and_match_edges(self,candidates: dict[str, list[dict]], paf_maps: np.ndarray, *, edge_min_score: float, integral_samples: int ) -> dict[tuple[str, str], list[tuple[dict, dict, float]]]:
+        """Compute edge scores and return matched edges per edge type."""
+        if paf_maps.ndim != 3 or paf_maps.shape[0] != 8:
+            raise ValueError(f"Expected paf maps with shape (8,H,W), got {paf_maps.shape}")
+
+        edge_matches: dict[tuple[str, str], list[tuple[dict, dict, float]]] = {}
+        for edge_idx, (k, l) in enumerate(EDGE_TYPES):
+            left = candidates.get(k, [])
+            right = candidates.get(l, [])
+            if not left or not right:
+                edge_matches[(k, l)] = []
+                continue
+            paf_xy = paf_maps[edge_idx * 2 : edge_idx * 2 + 2]
+            score_matrix = np.full((len(left), len(right)), -np.inf, dtype=np.float32)
+            for i, ck in enumerate(left):
+                p0 = (float(ck["x"]), float(ck["y"]))
+                for j, cl in enumerate(right):
+                    p1 = (float(cl["x"]), float(cl["y"]))
+                    score_matrix[i, j] = float(
+                        self.edge_score_line_integral(paf_xy, p0, p1, samples=integral_samples)
+                    )
+            matches = self.match_edges_hungarian(score_matrix, min_score=edge_min_score)
+            edge_matches[(k, l)] = [(left[i], right[j], s) for i, j, s in matches]
+        return edge_matches
+    
+    def match_edges_hungarian(self, score_matrix: np.ndarray, *, min_score: float) -> list[tuple[int, int, float]]:
+        """Bipartite matching maximizing total score with a one-to-one constraint.
+
+        Uses the Hungarian algorithm (global assignment) instead of greedy selection.
+        Pairs with score < min_score are treated as invalid and will be dropped.
+        """
+        min_score = float(min_score)
+        if score_matrix.size == 0:
+            return []
+        if score_matrix.ndim != 2:
+            raise ValueError(f"Expected 2D score matrix, got {score_matrix.shape}")
+
+        nk, nl = map(int, score_matrix.shape)
+        n = int(max(nk, nl))
+
+        # Build a square profit matrix with dummy rows/cols (profit=0) so corners can
+        # remain unmatched rather than being forced into a low-score pairing.
+        profit = np.zeros((n, n), dtype=np.float64)
+        profit[:nk, :nl] = score_matrix.astype(np.float64, copy=False)
+
+        invalid = (~np.isfinite(profit)) | (profit < min_score)
+        profit[invalid] = -1e12  # strongly discourage invalid pairings
+
+        # Convert to non-negative min-cost form.
+        cost = -profit
+        finite = np.isfinite(cost)
+        if not np.all(finite):
+            cost[~finite] = 1e12
+        cmin = float(np.min(cost))
+        if np.isfinite(cmin) and cmin < 0.0:
+            cost = cost - cmin
+
+        assignment = self._hungarian_min_cost(cost)
+        matches: list[tuple[int, int, float]] = []
+        for i, j in assignment:
+            if i >= nk or j >= nl:
+                continue  # dummy assignment
+            s = float(score_matrix[i, j])
+            if (not np.isfinite(s)) or s < min_score:
+                continue
+            matches.append((int(i), int(j), float(s)))
+
+        matches.sort(key=lambda t: t[2], reverse=True)
+        return matches
+
+    def _hungarian_min_cost(self, cost: np.ndarray) -> list[tuple[int, int]]:
+        """Solve the square assignment problem (min-cost) with the Hungarian algorithm.
+
+        Returns a list of (row, col) assignments. Expects a finite 2D square array.
+        """
+        if cost.ndim != 2 or cost.shape[0] != cost.shape[1]:
+            raise ValueError(f"Expected square cost matrix, got {cost.shape}")
+        n = int(cost.shape[0])
+        if n == 0:
+            return []
+
+        # Implementation adapted to be small and dependency-free.
+        # Uses potentials (u, v) and a shortest augmenting path search (O(n^3)).
+        a = cost.astype(np.float64, copy=False)
+        u = np.zeros(n + 1, dtype=np.float64)
+        v = np.zeros(n + 1, dtype=np.float64)
+        p = np.zeros(n + 1, dtype=np.int64)
+        way = np.zeros(n + 1, dtype=np.int64)
+
+        for i in range(1, n + 1):
+            p[0] = i
+            j0 = 0
+            minv = np.full(n + 1, np.inf, dtype=np.float64)
+            used = np.zeros(n + 1, dtype=np.bool_)
+            while True:
+                used[j0] = True
+                i0 = int(p[j0])
+                delta = np.inf
+                j1 = 0
+                for j in range(1, n + 1):
+                    if used[j]:
+                        continue
+                    cur = a[i0 - 1, j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+                if not np.isfinite(delta):
+                    raise ValueError("Hungarian failed: non-finite delta (check cost matrix).")
+                for j in range(0, n + 1):
+                    if used[j]:
+                        u[p[j]] += delta
+                        v[j] -= delta
+                    else:
+                        minv[j] -= delta
+                j0 = j1
+                if p[j0] == 0:
+                    break
+            while True:
+                j1 = int(way[j0])
+                p[j0] = p[j1]
+                j0 = j1
+                if j0 == 0:
+                    break
+
+        assignment: list[tuple[int, int]] = []
+        for j in range(1, n + 1):
+            i = int(p[j])
+            if i != 0:
+                assignment.append((i - 1, j - 1))
+        return assignment
+
+    def edge_score_line_integral(self, paf_xy: np.ndarray, p0: tuple[float, float], p1: tuple[float, float], *, samples: int = 10 ) -> float:
+        x0, y0 = p0
+        x1, y1 = p1
+        dx = float(x1 - x0)
+        dy = float(y1 - y0)
+        norm = math.hypot(dx, dy)
+        if not math.isfinite(norm) or norm < 1e-6:
+            return float("-inf")
+        ux = dx / norm
+        uy = dy / norm
+
+        samples = max(2, int(samples))
+        acc = 0.0
+        for i in range(samples):
+            u = float(i) / float(samples - 1)
+            x = float(x0 + u * dx)
+            y = float(y0 + u * dy)
+            vx, vy = self._bilinear_sample_2ch(paf_xy, x, y)
+            acc += float(vx * ux + vy * uy)
+        return acc / float(samples)
+
+    def _bilinear_sample_2ch(self, paf_xy: np.ndarray, x: float, y: float) -> tuple[float, float]:
+        """Bilinear sample a 2-channel PAF at float coords, with edge clamping."""
+        height, width = paf_xy.shape[1], paf_xy.shape[2]
+        x = float(np.clip(x, 0.0, width - 1.0))
+        y = float(np.clip(y, 0.0, height - 1.0))
+        x0 = int(math.floor(x))
+        y0 = int(math.floor(y))
+        x1 = min(width - 1, x0 + 1)
+        y1 = min(height - 1, y0 + 1)
+        dx = x - x0
+        dy = y - y0
+
+        v00 = paf_xy[:, y0, x0]
+        v10 = paf_xy[:, y0, x1]
+        v01 = paf_xy[:, y1, x0]
+        v11 = paf_xy[:, y1, x1]
+        v0 = v00 * (1.0 - dx) + v10 * dx
+        v1 = v01 * (1.0 - dx) + v11 * dx
+        v = v0 * (1.0 - dy) + v1 * dy
+        return float(v[0]), float(v[1])
      
     def get_camera_intrinsics(self, width, height):
         if (
@@ -277,7 +603,7 @@ class GateDetector:
         if paf_maps.ndim != 3 or paf_maps.shape[0] != 8:
             return []
 
-        candidates = extract_corner_candidates(
+        candidates = self.extract_corner_candidates(
             corner_maps,
             threshold=self.corner_conf_threshold,
             topk=self.corner_topk,
@@ -286,13 +612,13 @@ class GateDetector:
         if any(len(candidates[name]) == 0 for name in CORNER_NAMES):
             return []
 
-        edge_matches = score_and_match_edges(
+        edge_matches = self.score_and_match_edges(
             candidates,
             paf_maps,
             edge_min_score=self.edge_min_score,
             integral_samples=self.integral_samples,
         )
-        raw_gates = assemble_gates_from_edges(edge_matches)
+        raw_gates = self.assemble_gates_from_edges(edge_matches)
         if not raw_gates:
             return []
 

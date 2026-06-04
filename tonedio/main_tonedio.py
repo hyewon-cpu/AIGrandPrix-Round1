@@ -316,33 +316,6 @@ class MavlinkDepthGateRacer:
             "linear_velocity": np.asarray(local_position["linear_velocity"], dtype=np.float32),
         }
 
-    def get_closest_track_gate(self, drone_position):
-        gates = self.data.get("track_gates") or []
-        if not gates:
-            return None
-
-        drone_position = np.asarray(drone_position, dtype=np.float32).reshape(-1)
-        if drone_position.size < 3:
-            return None
-
-        closest = None
-        closest_distance = None
-        for gate in gates:
-            if not isinstance(gate, dict) or gate.get("position_ned") is None:
-                continue
-            gate_position = np.asarray(gate["position_ned"], dtype=np.float32).reshape(-1)
-            if gate_position.size < 3:
-                continue
-            distance = float(np.linalg.norm(gate_position[:3] - drone_position[:3]))
-            if closest_distance is None or distance < closest_distance:
-                closest_distance = distance
-                closest = {
-                    "gate_id": gate.get("gate_id"),
-                    "position_ned": gate_position[:3],
-                    "distance": distance,
-                }
-        return closest
-
     def preprocess_depth(self, depth):
         depth = depth.copy()
         depth[~np.isfinite(depth)] = 24.0
@@ -1034,14 +1007,10 @@ class MavlinkDepthGateRacer:
         self.send_attitude_command(command_delta_rpy, throttle)
 
         if self.args.debug_print:
-            closest_gate = self.get_closest_track_gate(state["position"])
             print(
                 "[debug]",
                 "depth_input=", "infinite",
                 "drone_position=", np.round(state["position"], 3),
-                "closest_gate_id=", None if closest_gate is None else closest_gate["gate_id"],
-                "closest_gate_position=", None if closest_gate is None else np.round(closest_gate["position_ned"], 3),
-                "closest_gate_distance=", None if closest_gate is None else round(closest_gate["distance"], 3),
                 "target_src=", target_source,
                 "attitude_rpy=", np.round(current_rpy, 3),
                 "raw_target_v=", np.round(raw_target_v, 3),
@@ -1244,14 +1213,10 @@ class MavlinkDepthGateRacer:
         self.send_attitude_command(command_delta_rpy, throttle)
 
         if self.args.debug_print:
-            closest_gate = self.get_closest_track_gate(state["position"])
             print(
                 "[debug]",
                 "depth_input=", "infinite",
                 "drone_position=", np.round(state["position"], 3),
-                "closest_gate_id=", None if closest_gate is None else closest_gate["gate_id"],
-                "closest_gate_position=", None if closest_gate is None else np.round(closest_gate["position_ned"], 3),
-                "closest_gate_distance=", None if closest_gate is None else round(closest_gate["distance"], 3),
                 "target_src=", target_source,
                 "attitude_rpy=", np.round(current_rpy, 3),
                 "raw_target_v=", np.round(raw_target_v, 3),
