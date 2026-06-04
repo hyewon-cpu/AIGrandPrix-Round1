@@ -5,6 +5,7 @@ import threading
 from pymavlink import mavutil
 
 ENCAPSULATED_RACE_STATUS_MSG_ID = 1
+ENCAPSULATED_TRACK_INFO_MSG_ID = 2
 
 class MAVLinkRX:
 
@@ -200,6 +201,8 @@ class MAVLinkRX:
 
             if int(data_type) == ENCAPSULATED_RACE_STATUS_MSG_ID:
                 self.on_race_status(msg)
+            elif int(data_type) == ENCAPSULATED_TRACK_INFO_MSG_ID:
+                self.on_track_data_packet(msg)
 
     def on_race_status(self, msg):
         payload_size = int(getattr(msg, "size", len(msg.data)))
@@ -212,6 +215,78 @@ class MAVLinkRX:
         # last_gate_race_time - race time in seconds when last gate was passed
         data_type, sim_boot_time_ms, race_start_boot_time_ms, race_finish_time_ns, active_gate_index, last_gate_race_time = struct.unpack_from(
             "<BQqqIq", raw_payload)
+        self.data["race_status"] = {
+            "sim_boot_time_ms": sim_boot_time_ms,
+            "race_start_boot_time_ms": race_start_boot_time_ms,
+            "race_finish_time_ns": race_finish_time_ns,
+            "active_gate_index": active_gate_index,
+            "last_gate_race_time": last_gate_race_time,
+            "timestamp": time.time(),
+        }
+
+    def on_track_data_packet(self, msg):
+        payload_size = int(getattr(msg, "size", len(msg.data)))
+        raw_payload = bytes(msg.data[:payload_size])
+        if len(raw_payload) < 3:
+            return
+
+        # header:
+        #   data_type - ID of this message
+        #   transfer_id - ID of the group of packets this chunk belongs to
+        data_type, transfer_id = struct.unpack_from("<BH", raw_payload)
+        if transfer_id not in self.expected_num_track_chunks:
+            return
+
+        self.track_chunks[transfer_id][msg.seqnr] = raw_payload[3:]
+        if len(self.track_chunks[transfer_id]) == self.expected_num_track_chunks[transfer_id]:
+            full_payload = bytes()
+            for i in range(len(self.track_chunks[transfer_id])):
+                full_payload += self.track_chunks[transfer_id][i]
+            del self.track_chunks[transfer_id]
+            del self.expected_num_track_chunks[transfer_id]
+            self.on_track_data(full_payload)
+
+    def on_track_data(self, payload):
+        # header:
+        #   num_gates - track gate count
+        if len(payload) < 2:
+            return
+
+        num_gates, = struct.unpack_from("<H", payload)
+        payload = payload[2:]
+        gates = []
+        gate_payload_size = struct.calcsize("<Hfffffffff")
+        for i in range(num_gates):
+            if len(payload) < gate_payload_size:
+                break
+
+            # Gate Info
+            #   gate_id - range is 0 - num_gates
+            #   position_ned_x, position_ned_y, position_ned_z - Position of gate in NED coordinates
+            #   orientation_ned_w, orientation_ned_x, orientation_ned_y, orientation_ned_z - Orientation of gate in NED coordinates
+            #   width - gate width in metres
+            #   height - gate height in metres
+            gate_id, position_ned_x, position_ned_y, position_ned_z, orientation_ned_w, orientation_ned_x, orientation_ned_y, orientation_ned_z, width, height = struct.unpack_from(
+                "<Hfffffffff", payload)
+            payload = payload[gate_payload_size:]
+            gates.append({
+                "gate_id": gate_id,
+                "position_ned": (position_ned_x, position_ned_y, position_ned_z),
+                "orientation_ned": (
+                    orientation_ned_w,
+                    orientation_ned_x,
+                    orientation_ned_y,
+                    orientation_ned_z,
+                ),
+                "width": width,
+                "height": height,
+            })
+
+        self.data["track_gates"] = gates
+        self.data["track_data"] = {
+            "num_gates": len(gates),
+            "timestamp": time.time(),
+        }
 
     def on_actuator_output_status(self, msg):
         time_boot_us = msg.time_usec
