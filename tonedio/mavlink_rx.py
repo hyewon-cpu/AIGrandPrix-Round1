@@ -166,6 +166,8 @@ class MAVLinkRX:
         time_boot_us = msg.time_usec
         reset_count = msg.reset_counter
         self.data["odometry"] = {
+            "frame_id": msg.frame_id,
+            "child_frame_id": msg.child_frame_id,
             "position": (pos_x, pos_y, pos_z),
             "orientation": (qw, qx, qy, qz),
             "linear_velocity": (vel_x, vel_y, vel_z),

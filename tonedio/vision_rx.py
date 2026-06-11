@@ -76,13 +76,13 @@ class VisionRX:
                 img_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
                 image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
                 if image is not None:
-                    self.process_frame(frame_id, image)
+                    self.process_frame(frame_id, image, sim_time_ns)
                 else:
                     print(f"Failed to decode frame: {frame_id}")
 
                 del frames[frame_id]
 
-    def process_frame(self, frame_id, img):
+    def process_frame(self, frame_id, img, sim_time_ns=None):
         #
         #
         # Success!
@@ -91,5 +91,6 @@ class VisionRX:
         #
         self.data["latest_frame"] = {
             "frame_id": int(frame_id),
+            "sim_time_ns": None if sim_time_ns is None else int(sim_time_ns),
             "image_bgr": img,
         }

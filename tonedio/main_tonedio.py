@@ -34,12 +34,12 @@ from tonedio.vision_rx import VisionRX
 
 
 DEFAULT_MODELS_DIR = SCRIPT_DIR / "models"
-DEFAULT_GATE_DETECTION_PATH = DEFAULT_MODELS_DIR / "gate_detection_112112.pt"
+DEFAULT_GATE_DETECTION_PATH = DEFAULT_MODELS_DIR / "gate_detection_round1_112112.pt"
 DEFAULT_DEPTH_ONNX_PATH = DEFAULT_MODELS_DIR / "dn_model_latest.onnx"
 DEFAULT_CONTROL_MODEL_PATH = DEFAULT_MODELS_DIR / "controlmodel.pth"
 
-SIM_TO_NORMAL = np.diag([1.0, 1.0, -1.0]).astype(np.float32)
-SIM_TO_NORMAL_ROT = np.diag([1.0, 1.0, -1.0]).astype(np.float32)
+SIM_TO_NORMAL = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+SIM_TO_NORMAL_ROT = np.diag([1.0, 1.0, 1.0]).astype(np.float32)
 INITIAL_ALIGNED_ROLL = 0.0
 INITIAL_ALIGNED_YAW = -math.pi
 GATE_EDGE_TYPES = (("TL", "TR"), ("TR", "BR"), ("BR", "BL"), ("BL", "TL"))
@@ -73,16 +73,17 @@ def build_args():
     parser.add_argument("--depth_sleep", type=float, default=0.01)
     parser.add_argument("--gate_sleep", type=float, default=0.01)
     parser.add_argument("--control_sleep", type=float, default=0.01)
-    parser.add_argument("--target_speed", type=float, default=1.0)
+    parser.add_argument("--target_speed", type=float, default=3.0)
     parser.add_argument("--target_type", type=str, choices=["max", "raw", "min"], default="min")
-    parser.add_argument("--world_target_x", type=float, default=-100.0)
-    parser.add_argument("--world_target_y", type=float, default=0.0)
-    parser.add_argument("--world_target_z", type=float, default=0.0)
-    parser.add_argument("--hover_throttle", type=float, default=0.27)
+    parser.add_argument("--world_target_x", type=float, default=-25)
+    parser.add_argument("--world_target_y", type=float, default=-0.5)
+    parser.add_argument("--world_target_z", type=float, default=-0.5)
+    parser.add_argument("--always_world_fallback", action="store_true", default=False)
+    parser.add_argument("--hover_throttle", type=float, default=0.3 )
     parser.add_argument("--attitude_p_gain", type=float, default=1)
-    parser.add_argument("--max_delta_roll", type=float, default=1)
-    parser.add_argument("--max_delta_pitch", type=float, default=1)
-    parser.add_argument("--max_delta_yaw", type=float, default=1)
+    parser.add_argument("--max_delta_roll", type=float, default=3.14)
+    parser.add_argument("--max_delta_pitch", type=float, default=3.14)
+    parser.add_argument("--max_delta_yaw", type=float, default=3.14)
     parser.add_argument("--margin", type=float, default=0.2)
     parser.add_argument("--no_odom", action="store_true", default=False)
     parser.add_argument("--debug_print", action="store_true", default=False)
@@ -90,35 +91,50 @@ def build_args():
     parser.add_argument("--debug_interval_sec", type=float, default=1.0)
     parser.add_argument("--debug_every_command", action="store_true", default=False)
     parser.add_argument("--viz_rgb", action="store_true", default=False)
+    parser.add_argument("--save_rgb_dir", type=str, default="")
+    parser.add_argument("--save_rgb_every", type=int, default=1)
     parser.add_argument("--save_rgb_overlay_dir", type=str, default="")
-    parser.add_argument("--save_rgb_overlay_every", type=int, default=10)
+    parser.add_argument("--save_rgb_overlay_every", type=int, default=1)
     parser.add_argument("--save_depth_dir", type=str, default="")
-    parser.add_argument("--save_depth_every", type=int, default=10)
+    parser.add_argument("--save_depth_every", type=int, default=1)
 
     parser.add_argument("--control_model_path", type=str, default=str(DEFAULT_CONTROL_MODEL_PATH))
     parser.add_argument("--gate_model_path", type=str, default=str(DEFAULT_GATE_DETECTION_PATH))
     parser.add_argument("--depth_onnx_path", type=str, default=str(DEFAULT_DEPTH_ONNX_PATH))
     parser.add_argument("--depth_input_width", type=int, default=112)
     parser.add_argument("--depth_input_height", type=int, default=112)
+    parser.add_argument("--depth_crop_width", type=int, default=360)
+    parser.add_argument("--depth_crop_height", type=int, default=360)
+    parser.add_argument("--depth_scale", type=float, default=1)
+    parser.add_argument("--control_fake_infinite_depth", action="store_true", default=False)
     parser.add_argument("--gate_input_width", type=int, default=112)
     parser.add_argument("--gate_input_height", type=int, default=112)
-    parser.add_argument("--gate_crop_size", type=int, default=336)
+    parser.add_argument("--gate_crop_width", type=int, default=360)
+    parser.add_argument("--gate_crop_height", type=int, default=360)
     parser.add_argument("--depth_device", type=str, default="auto")
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--dim_obs", type=int, default=10)
     parser.add_argument("--dim_action", type=int, default=6)
 
     parser.add_argument("--corner_conf_threshold", type=float, default=0.5)
     parser.add_argument("--corner_topk", type=int, default=50)
-    parser.add_argument("--corner_nms_radius", type=int, default=5)
+    parser.add_argument("--corner_nms_radius", type=int, default=2)
     parser.add_argument("--edge_min_score", type=float, default=0.1)
-    parser.add_argument("--integral_samples", type=int, default=15)
-    parser.add_argument("--gate_switch_depth_m", type=float, default=100.0)
-    parser.add_argument("--gate_depth_switch_tol_m", type=float, default=100.0)
+    parser.add_argument("--integral_samples", type=int, default=10)
+    parser.add_argument("--gate_switch_depth_m", type=float, default=5.0)
+    parser.add_argument("--gate_depth_switch_tol_m", type=float, default=1.0)
     parser.add_argument("--gate_max_depth_m", type=float, default=1000.0)
+    parser.add_argument(
+        "--gate_depth_mode",
+        type=str,
+        choices=["depth_map", "gate_size", "gate_size_fallback"],
+        default="gate_size",
+    )
+    parser.add_argument("--gate_real_width_m", type=float, default=2.7)
+    parser.add_argument("--gate_real_height_m", type=float, default=2.7)
     parser.add_argument("--camera_fov_degrees", type=float, default=90.0)
-    parser.add_argument("--camera_fx", type=float, default=320.0)
-    parser.add_argument("--camera_fy", type=float, default=320.0)
+    parser.add_argument("--camera_fx", type=float, default=180.0)
+    parser.add_argument("--camera_fy", type=float, default=180.0)
     parser.add_argument("--camera_cx", type=float, default=320.0)
     parser.add_argument("--camera_cy", type=float, default=180.0)
     return parser.parse_args()
@@ -170,7 +186,7 @@ def attitude_error_to_body_delta_command(error_rpy, gain, max_delta):
     )
 
 
-class MavlinkDepthGateRacer:
+class DepthGateRacer:
     def __init__(self, mavlink_conn, shared_data, system_boot_ms, args):
         self.mavlink_conn = mavlink_conn
         self.data = shared_data
@@ -181,6 +197,8 @@ class MavlinkDepthGateRacer:
         self.last_frame_id = None
         self.target_v = None
         self.target_info = {}
+        self.last_gate_world_estimate = None
+        self.last_backup_gate_world_estimate = None
         self.world_target_v = np.array(
             [args.world_target_x, args.world_target_y, args.world_target_z],
             dtype=np.float32,
@@ -189,8 +207,14 @@ class MavlinkDepthGateRacer:
         self.debug_counter = 0
         self.last_idle_debug_time = 0.0
         self.last_control_debug_time = 0.0
+        self.rgb_save_counter = 0
         self.rgb_overlay_save_counter = 0
         self.depth_save_counter = 0
+        self.save_rgb_dir = None
+        if args.save_rgb_dir:
+            self.save_rgb_dir = Path(args.save_rgb_dir)
+            self.save_rgb_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Saving RGB images to: {self.save_rgb_dir.resolve()}", flush=True)
         self.save_rgb_overlay_dir = None
         if args.save_rgb_overlay_dir:
             self.save_rgb_overlay_dir = Path(args.save_rgb_overlay_dir)
@@ -235,40 +259,47 @@ class MavlinkDepthGateRacer:
             daemon=True,
         )
 
-        self.depth_estimator = DepthAnythingOnnxEstimator(
-            onnx_path=args.depth_onnx_path,
-            input_width=args.depth_input_width,
-            input_height=args.depth_input_height,
-            device=args.depth_device,
-        )
-        self.gate_detector = GateDetector(
-            checkpoint_path=args.gate_model_path,
-            device=args.device,
-            gate_switch_depth_m=args.gate_switch_depth_m,
-            gate_depth_switch_tol_m=args.gate_depth_switch_tol_m,
-            gate_max_depth_m=args.gate_max_depth_m,
-            corner_conf_threshold=args.corner_conf_threshold,
-            corner_topk=args.corner_topk,
-            corner_nms_radius=args.corner_nms_radius,
-            edge_min_score=args.edge_min_score,
-            integral_samples=args.integral_samples,
-            debug_print=False,
-            debug_print_every=max(1, args.debug_print_every),
-            camera_fov_degrees=args.camera_fov_degrees,
-            camera_fx=args.camera_fx,
-            camera_fy=args.camera_fy,
-            camera_cx=args.camera_cx,
-            camera_cy=args.camera_cy,
-            camera_pose={
-                "X": 0.0,
-                "Y": 0.0,
-                "Z": 0.0,
-                "Roll": 0.0,
-                "Pitch": 20.0,
-                "Yaw": 0.0,
-            },
-            load_airsim_camera_settings=False,
-        )
+        self.depth_estimator = None
+        if not getattr(args, "disable_depth_estimation", False):
+            self.depth_estimator = DepthAnythingOnnxEstimator(
+                onnx_path=args.depth_onnx_path,
+                input_width=args.depth_input_width,
+                input_height=args.depth_input_height,
+                device=args.depth_device,
+            )
+        self.gate_detector = None
+        if not getattr(args, "disable_learned_gate_detector", False):
+            self.gate_detector = GateDetector(
+                checkpoint_path=args.gate_model_path,
+                device=args.device,
+                gate_switch_depth_m=args.gate_switch_depth_m,
+                gate_depth_switch_tol_m=args.gate_depth_switch_tol_m,
+                gate_max_depth_m=args.gate_max_depth_m,
+                gate_depth_mode=args.gate_depth_mode,
+                gate_real_width_m=args.gate_real_width_m,
+                gate_real_height_m=args.gate_real_height_m,
+                corner_conf_threshold=args.corner_conf_threshold,
+                corner_topk=args.corner_topk,
+                corner_nms_radius=args.corner_nms_radius,
+                edge_min_score=args.edge_min_score,
+                integral_samples=args.integral_samples,
+                debug_print=False,
+                debug_print_every=max(1, args.debug_print_every),
+                camera_fov_degrees=args.camera_fov_degrees,
+                camera_fx=args.camera_fx,
+                camera_fy=args.camera_fy,
+                camera_cx=args.camera_cx,
+                camera_cy=args.camera_cy,
+                camera_pose={
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                    "Roll": 0.0,
+                    "Pitch": 20.0,
+                    "Yaw": 0.0,
+                },
+                load_airsim_camera_settings=False,
+            )
         self.model = DiffPhysModel(
             args.control_model_path,
             dim_obs=args.dim_obs,
@@ -296,9 +327,13 @@ class MavlinkDepthGateRacer:
         if odom is not None:
             return {
                 "source": "odometry",
+                "frame_id": odom.get("frame_id"),
+                "child_frame_id": odom.get("child_frame_id"),
                 "position": np.asarray(odom["position"], dtype=np.float32),
                 "orientation": np.asarray(odom["orientation"], dtype=np.float32),
                 "linear_velocity": np.asarray(odom["linear_velocity"], dtype=np.float32),
+                "time_boot_us": odom.get("time_boot_us"),
+                "reset_count": odom.get("reset_count"),
             }
 
         local_position = self.data.get("local_position_ned")
@@ -314,6 +349,8 @@ class MavlinkDepthGateRacer:
             "position": np.asarray(local_position["position"], dtype=np.float32),
             "orientation": np.asarray(euler_to_quaternion(roll, pitch, yaw), dtype=np.float32),
             "linear_velocity": np.asarray(local_position["linear_velocity"], dtype=np.float32),
+            "time_boot_ms": local_position.get("time_boot_ms"),
+            "attitude_time_boot_ms": attitude.get("time_boot_ms"),
         }
 
     def preprocess_depth(self, depth):
@@ -343,6 +380,14 @@ class MavlinkDepthGateRacer:
             (self.args.max_delta_roll, self.args.max_delta_pitch, self.args.max_delta_yaw),
         )
         return error_rpy, command_delta_rpy
+
+    def calculate_gate_world_estimate(self, target_rel_drone, state):
+        if target_rel_drone is None or state is None:
+            return None
+        env_rot_ned = quaternion_to_rotation_matrix(state["orientation"])
+        return np.asarray(state["position"], dtype=np.float32) + (
+            env_rot_ned @ np.asarray(target_rel_drone, dtype=np.float32)
+        )
 
     def send_attitude_command(self, command_delta_rpy, throttle):
         now_ms = int(time.time() * 1000)
@@ -374,7 +419,8 @@ class MavlinkDepthGateRacer:
 
         up_vec = a_setpoint / thrust
         throttle = thrust + float(input_velocity[2] * abs(input_velocity[2]) * 0.01)
-        forward_vec = env_rot[:, 0] * 1.0 + input_target_v
+        #throttle = thrust - float(input_velocity[2] * abs(input_velocity[2]) * 0.01)
+        forward_vec = env_rot[:, 0] * 5.0 + input_target_v
         if abs(up_vec[2]) > 1e-6:
             forward_vec[2] = -(
                 forward_vec[0] * up_vec[0] + forward_vec[1] * up_vec[1]
@@ -390,27 +436,20 @@ class MavlinkDepthGateRacer:
         throttle = float(np.clip(throttle / 9.8 * self.args.hover_throttle, 0.0, 1.0))
         return float(roll), float(pitch), float(yaw), throttle, thrust
 
-    def update_gate_target(self, rgb, depth):
-        target_v_airsim, aux = self.estimate_gate_target_resized(rgb, depth)
-        self.aux = aux or {}
-        target_rel_drone = self.aux.get("gate_detection_target_rel_drone", target_v_airsim)
-        if target_rel_drone is None:
-            self.target_v = None
-        else:
-            self.target_v = airsim_to_normal_vector(target_rel_drone)
        
 
-    def fit_rgb_for_gate(self, rgb):
-        gate_w = max(1, int(self.args.gate_input_width))
-        gate_h = max(1, int(self.args.gate_input_height))
-        crop_size = max(1, int(self.args.gate_crop_size))
+    def fit_rgb_to_size(self, rgb, input_width, input_height, crop_width, crop_height):
+        input_w = max(1, int(input_width))
+        input_h = max(1, int(input_height))
+        crop_width = max(1, int(crop_width))
+        crop_height = max(1, int(crop_height))
         original_h, original_w = rgb.shape[:2]
         fitted = rgb
 
         crop_left = 0
         crop_top = 0
-        crop_w = min(crop_size, original_w)
-        crop_h = min(crop_size, original_h)
+        crop_w = min(crop_width, original_w)
+        crop_h = min(crop_height, original_h)
         if original_w > crop_w:
             crop_left = (original_w - crop_w) // 2
             fitted = fitted[:, crop_left : crop_left + crop_w]
@@ -423,9 +462,9 @@ class MavlinkDepthGateRacer:
         pad_top = 0
         pad_right = 0
         pad_bottom = 0
-        if cropped_w < crop_size or cropped_h < crop_size:
-            pad_w = max(0, crop_size - cropped_w)
-            pad_h = max(0, crop_size - cropped_h)
+        if cropped_w < crop_width or cropped_h < crop_height:
+            pad_w = max(0, crop_width - cropped_w)
+            pad_h = max(0, crop_height - cropped_h)
             pad_left = pad_w // 2
             pad_right = pad_w - pad_left
             pad_top = pad_h // 2
@@ -436,10 +475,10 @@ class MavlinkDepthGateRacer:
                 mode="edge",
             )
         crop_box_h, crop_box_w = fitted.shape[:2]
-        scale_x = float(gate_w) / float(crop_box_w)
-        scale_y = float(gate_h) / float(crop_box_h)
-        if crop_box_w != gate_w or crop_box_h != gate_h:
-            fitted = cv2.resize(fitted, (gate_w, gate_h), interpolation=cv2.INTER_LINEAR)
+        scale_x = float(input_w) / float(crop_box_w)
+        scale_y = float(input_h) / float(crop_box_h)
+        if crop_box_w != input_w or crop_box_h != input_h:
+            fitted = cv2.resize(fitted, (input_w, input_h), interpolation=cv2.INTER_LINEAR)
 
         transform = {
             "crop_left": float(crop_left),
@@ -452,13 +491,35 @@ class MavlinkDepthGateRacer:
             "resize_scale_y": float(scale_y),
             "crop_box_w": int(crop_box_w),
             "crop_box_h": int(crop_box_h),
-            "crop_size": int(crop_size),
-            "gate_w": int(gate_w),
-            "gate_h": int(gate_h),
+            "crop_size": int(max(crop_width, crop_height)),
+            "crop_width": int(crop_width),
+            "crop_height": int(crop_height),
+            "input_w": int(input_w),
+            "input_h": int(input_h),
+            "gate_w": int(input_w),
+            "gate_h": int(input_h),
             "original_w": int(original_w),
             "original_h": int(original_h),
         }
         return fitted.copy(), transform
+
+    def fit_rgb_for_gate(self, rgb):
+        return self.fit_rgb_to_size(
+            rgb,
+            self.args.gate_input_width,
+            self.args.gate_input_height,
+            self.args.gate_crop_width,
+            self.args.gate_crop_height,
+        )
+
+    def fit_rgb_for_depth(self, rgb):
+        return self.fit_rgb_to_size(
+            rgb,
+            self.args.depth_input_width,
+            self.args.depth_input_height,
+            self.args.depth_crop_width,
+            self.args.depth_crop_height,
+        )
 
     def resize_rgb_for_gate(self, rgb):
         fitted, _ = self.fit_rgb_for_gate(rgb)
@@ -641,16 +702,6 @@ class MavlinkDepthGateRacer:
             if xy is None:
                 continue
             cv2.circle(image_bgr, xy, 2, color, -1, lineType=cv2.LINE_AA)
-            cv2.putText(
-                image_bgr,
-                str(name),
-                (xy[0] + 3, xy[1] - 3),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.3,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
 
         center = self._pixel_xy(candidate.get("center"))
         if center is not None:
@@ -687,30 +738,34 @@ class MavlinkDepthGateRacer:
                     overlay,
                     candidate,
                     palette[idx % len(palette)],
-                    label=f"cand {idx + 1}",
                     thickness=1,
                 )
 
-        backup = aux.get("segmentation_backup_rect")
-        if isinstance(backup, dict):
-            self.draw_gate_candidate(overlay, backup, (255, 0, 255), label="backup", thickness=1)
-
         primary = aux.get("segmentation_primary_rect") or aux.get("segmentation_rect")
+
         if isinstance(primary, dict):
             depth_m = aux.get("gate_depth_m")
-            confidence = aux.get("gate_confidence")
-            label_parts = ["selected"]
+            primary_label = "primary"
             if isinstance(depth_m, (int, float)) and math.isfinite(float(depth_m)):
-                label_parts.append(f"{float(depth_m):.1f}m")
-            if isinstance(confidence, (int, float)) and math.isfinite(float(confidence)):
-                label_parts.append(f"conf {float(confidence):.2f}")
+                primary_label = f"primary {float(depth_m):.1f}m"
             self.draw_gate_candidate(
                 overlay,
                 primary,
                 (0, 255, 0),
-                label=" ".join(label_parts),
-                thickness=1,
+                label=primary_label,
+                thickness=2,
             )
+            if isinstance(depth_m, (int, float)) and math.isfinite(float(depth_m)):
+                cv2.putText(
+                    overlay,
+                    f"primary {float(depth_m):.1f}m",
+                    (12, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
         else:
             center = self._pixel_xy(aux.get("gate_center_px"))
             if center is not None:
@@ -723,25 +778,22 @@ class MavlinkDepthGateRacer:
                     thickness=1,
                     line_type=cv2.LINE_AA,
                 )
-
-        status = "gate"
-        if aux.get("gate_detection_target_cache_used"):
-            status = f"gate cached rank {aux.get('gate_detection_target_cache_rank', '?')}"
-        elif not aux:
-            status = "gate not detected"
-        cv2.putText(
-            overlay,
-            status,
-            (12, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (0, 255, 0) if aux else (0, 0, 255),
-            1,
-            cv2.LINE_AA,
-        )
         return overlay
+ 
+    def save_rgb_image(self, image_rgb, frame_id=None):
+        if self.save_rgb_dir is None:
+            return
+        save_every = max(1, int(self.args.save_rgb_every))
+        if self.rgb_save_counter % save_every == 0:
+            if frame_id is None:
+                name = f"rgb_{self.rgb_save_counter:06d}.png"
+            else:
+                name = f"rgb_frame_{int(frame_id):06d}.png"
+            out_path = self.save_rgb_dir / name
+            cv2.imwrite(str(out_path), cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
+        self.rgb_save_counter += 1
 
-    def save_rgb_overlay(self, overlay_bgr, frame_id=None):
+    def save_rgb_overlay(self, overlay_rgb, frame_id=None):
         if self.save_rgb_overlay_dir is None:
             return
         save_every = max(1, int(self.args.save_rgb_overlay_every))
@@ -751,7 +803,7 @@ class MavlinkDepthGateRacer:
             else:
                 name = f"rgb_overlay_frame_{int(frame_id):06d}.png"
             out_path = self.save_rgb_overlay_dir / name
-            cv2.imwrite(str(out_path), overlay_bgr)
+            cv2.imwrite(str(out_path), cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR))
         self.rgb_overlay_save_counter += 1
 
     def depth_to_display_image(self, depth):
@@ -784,17 +836,17 @@ class MavlinkDepthGateRacer:
             cv2.imwrite(str(out_path), self.depth_to_display_image(depth))
         self.depth_save_counter += 1
 
-    def show_or_save_rgb_overlay(self, image_bgr, frame_id=None, aux=None):
+    def show_or_save_rgb_overlay(self, image_rgb, frame_id=None, aux=None):
         if not self.args.viz_rgb and self.save_rgb_overlay_dir is None:
             return
         previous_aux = self.aux
         if aux is not None:
             self.aux = aux
-        overlay = self.build_rgb_overlay(image_bgr)
+        overlay = self.build_rgb_overlay(image_rgb)
         self.aux = previous_aux
         self.save_rgb_overlay(overlay, frame_id=frame_id)
         if self.args.viz_rgb:
-            cv2.imshow("rgb", overlay)
+            cv2.imshow("rgb",cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
             cv2.waitKey(1)
 
     def depth_callback(self):
@@ -804,16 +856,22 @@ class MavlinkDepthGateRacer:
             return
 
         frame_id = frame.get("frame_id")
+        frame_sim_time_ns = frame.get("sim_time_ns")
         if frame_id == self.last_depth_frame_id:
             return
         self.last_depth_frame_id = frame_id
 
         image_bgr = frame["image_bgr"]
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        depth_rgb, gate_transform = self.fit_rgb_for_gate(rgb)
-        gate_bgr, _ = self.fit_rgb_for_gate(image_bgr)
-        depth = self.depth_estimator.predict_depth(depth_rgb)
-        self.save_depth_image(depth, frame_id=frame_id)
+        depth_rgb, _ = self.fit_rgb_for_depth(rgb)
+        gate_rgb, gate_transform = self.fit_rgb_for_gate(rgb)
+        self.save_rgb_image(gate_rgb, frame_id=frame_id)
+        #self.save_rgb_image(gate_rgb, frame_id=frame_id)
+        if self.depth_estimator is None:
+            depth = np.full(depth_rgb.shape[:2], np.inf, dtype=np.float32)
+        else:
+            depth = self.depth_estimator.predict_depth(depth_rgb) * float(self.args.depth_scale)
+            self.save_depth_image(depth, frame_id=frame_id)
 
         with self._sensor_cond:
             self.current_depth_id += 1
@@ -822,9 +880,10 @@ class MavlinkDepthGateRacer:
                 {
                     "depth_id": depth_id,
                     "frame_id": frame_id,
+                    "frame_sim_time_ns": frame_sim_time_ns,
                     "image_bgr": image_bgr.copy(),
-                    "rgb": depth_rgb.copy(),
-                    "gate_bgr": gate_bgr.copy(),
+                    "depth_rgb": depth_rgb.copy(),
+                    "gate_rgb": gate_rgb.copy(),
                     "gate_transform": gate_transform,
                     "depth": depth.copy(),
                 }
@@ -832,9 +891,10 @@ class MavlinkDepthGateRacer:
             self._sensor_cond.notify_all()
         if self.args.debug_print:
             print(
-                "[depth]",
+                "\n[depth]",
                 "depth_id=", depth_id,
                 "frame=", frame_id,
+                "frame_sim_time_ns=", frame_sim_time_ns,
                 flush=True,
             )
 
@@ -847,9 +907,10 @@ class MavlinkDepthGateRacer:
                         depth_item = {
                             "depth_id": item["depth_id"],
                             "frame_id": item["frame_id"],
+                            "frame_sim_time_ns": item.get("frame_sim_time_ns"),
                             "image_bgr": item["image_bgr"].copy(),
-                            "rgb": item["rgb"].copy(),
-                            "gate_bgr": item["gate_bgr"].copy(),
+                            "depth_rgb": item["depth_rgb"].copy(),
+                            "gate_rgb": item["gate_rgb"].copy(),
                             "gate_transform": dict(item["gate_transform"]),
                             "depth": item["depth"].copy(),
                         }
@@ -859,18 +920,55 @@ class MavlinkDepthGateRacer:
                 return
 
         target_v_airsim, aux = self.estimate_gate_target_resized(
-            depth_item["gate_bgr"],
+            depth_item["gate_rgb"],
             depth_item["depth"],
             transform=depth_item["gate_transform"],
         )
         aux = aux or {}
         target_rel_drone = aux.get("gate_detection_target_rel_drone", target_v_airsim)
+        backup_target_rel_drone = aux.get(
+            "segmentation_backup_target_rel_drone",
+            aux.get("segmentation_backup_target_airsim"),
+        )
+        target_rel_camera = aux.get("segmentation_target_rel_camera", target_v_airsim)
+        backup_target_rel_camera = aux.get("segmentation_backup_target_rel_camera")
         gate_model_aux = aux.get("gate_model_aux", aux)
+        cache_used = bool(gate_model_aux.get("gate_detection_target_cache_used")) if isinstance(gate_model_aux, dict) else False
+        cache_rank = gate_model_aux.get("gate_detection_target_cache_rank") if isinstance(gate_model_aux, dict) else None
+        cache_reason = gate_model_aux.get("gate_detection_target_cache_reason") if isinstance(gate_model_aux, dict) else None
         if target_rel_drone is None:
             target_v = None
         else:
             target_v = airsim_to_normal_vector(target_rel_drone)
         gate_center = gate_model_aux.get("gate_center_px") if isinstance(gate_model_aux, dict) else None
+        state_snapshot = self.get_state()
+        gate_world_estimate = None
+        backup_gate_world_estimate = None
+        if target_rel_drone is not None:
+            if cache_used and self.last_gate_world_estimate is not None:
+                gate_world_estimate = np.asarray(self.last_gate_world_estimate, dtype=np.float32).copy()
+            else:
+                gate_world_estimate = self.calculate_gate_world_estimate(target_rel_drone, state_snapshot)
+                if gate_world_estimate is not None and not cache_used:
+                    self.last_gate_world_estimate = gate_world_estimate.copy()
+        if backup_target_rel_drone is not None:
+            if cache_used and self.last_backup_gate_world_estimate is not None:
+                backup_gate_world_estimate = np.asarray(
+                    self.last_backup_gate_world_estimate,
+                    dtype=np.float32,
+                ).copy()
+            else:
+                backup_gate_world_estimate = self.calculate_gate_world_estimate(
+                    backup_target_rel_drone,
+                    state_snapshot,
+                )
+                if backup_gate_world_estimate is not None and not cache_used:
+                    self.last_backup_gate_world_estimate = backup_gate_world_estimate.copy()
+        elif self.last_backup_gate_world_estimate is not None:
+            backup_gate_world_estimate = np.asarray(
+                self.last_backup_gate_world_estimate,
+                dtype=np.float32,
+            ).copy()
 
         with self._sensor_cond:
             self.target_v = target_v
@@ -878,10 +976,34 @@ class MavlinkDepthGateRacer:
                 "source": "gate" if target_rel_drone is not None else "none",
                 "depth_id": depth_item["depth_id"],
                 "frame_id": depth_item["frame_id"],
+                "frame_sim_time_ns": depth_item.get("frame_sim_time_ns"),
+                "pose_source": None if state_snapshot is None else state_snapshot.get("source"),
+                "pose_frame_id": None if state_snapshot is None else state_snapshot.get("frame_id"),
+                "pose_child_frame_id": None if state_snapshot is None else state_snapshot.get("child_frame_id"),
+                "pose_time_boot_us": None if state_snapshot is None else state_snapshot.get("time_boot_us"),
+                "pose_time_boot_ms": None if state_snapshot is None else state_snapshot.get("time_boot_ms"),
+                "cache_used": cache_used,
+                "cache_rank": cache_rank,
+                "cache_reason": cache_reason,
+                "gate_world_estimate": (
+                    None
+                    if gate_world_estimate is None
+                    else np.asarray(gate_world_estimate, dtype=np.float32).copy()
+                ),
+                "backup_gate_world_estimate": (
+                    None
+                    if backup_gate_world_estimate is None
+                    else np.asarray(backup_gate_world_estimate, dtype=np.float32).copy()
+                ),
                 "target_rel_drone": (
                     None
                     if target_rel_drone is None
                     else np.asarray(target_rel_drone, dtype=np.float32).copy()
+                ),
+                "backup_target_rel_drone": (
+                    None
+                    if backup_target_rel_drone is None
+                    else np.asarray(backup_target_rel_drone, dtype=np.float32).copy()
                 ),
             }
             self.aux = aux
@@ -896,12 +1018,27 @@ class MavlinkDepthGateRacer:
             print(
                 "[gate]",
                 "center=", center_disp,
+                "target_rel_drone=", np.round(target_rel_drone, 3) if target_rel_drone is not None else None,
+                "target_rel_camera=", np.round(target_rel_camera, 3) if target_rel_camera is not None else None,
+                "gate_world_est=", None if gate_world_estimate is None else np.round(gate_world_estimate, 3),
+                "backup_target_rel_drone=", np.round(backup_target_rel_drone, 3) if backup_target_rel_drone is not None else None,
+                "backup_target_rel_camera=", np.round(backup_target_rel_camera, 3) if backup_target_rel_camera is not None else None,
+                "backup_gate_world_est=", None if backup_gate_world_estimate is None else np.round(backup_gate_world_estimate, 3),
+                "rgb_frame=", depth_item["frame_id"],
+                "rgb_sim_time_ns=", depth_item.get("frame_sim_time_ns"),
+                "pose_src=", None if state_snapshot is None else state_snapshot.get("source"),
+                "pose_frame_id=", None if state_snapshot is None else state_snapshot.get("frame_id"),
+                "pose_child_frame_id=", None if state_snapshot is None else state_snapshot.get("child_frame_id"),
+                "pose_time_boot_us=", None if state_snapshot is None else state_snapshot.get("time_boot_us"),
                 "target_v=", None if target_v is None else np.round(target_v, 3),
+                "cache_used=", cache_used,
+                "cache_rank=", cache_rank,
+                "cache_reason=", cache_reason,
                 flush=True,
             )
 
         self.show_or_save_rgb_overlay(
-            depth_item["rgb"],
+            depth_item["gate_rgb"],
             frame_id=depth_item["frame_id"],
             aux=aux.get("gate_model_aux", aux),
         )
@@ -926,6 +1063,16 @@ class MavlinkDepthGateRacer:
                                 target_info_snapshot["target_rel_drone"],
                                 copy=True,
                             )
+                        if target_info_snapshot.get("gate_world_estimate") is not None:
+                            target_info_snapshot["gate_world_estimate"] = np.array(
+                                target_info_snapshot["gate_world_estimate"],
+                                copy=True,
+                            )
+                        if target_info_snapshot.get("backup_gate_world_estimate") is not None:
+                            target_info_snapshot["backup_gate_world_estimate"] = np.array(
+                                target_info_snapshot["backup_gate_world_estimate"],
+                                copy=True,
+                            )
                         break
                 self._sensor_cond.wait(timeout=0.05)
             else:
@@ -941,7 +1088,12 @@ class MavlinkDepthGateRacer:
         env_rot_ned = quaternion_to_rotation_matrix(state["orientation"])
         env_rot = sim_to_normal_rotation(env_rot_ned)
         #env_rot = env_rot_ned.copy()
-        linear_velocity = sim_to_normal(state["linear_velocity"])
+        linear_velocity_body_frd = state["linear_velocity"]
+        linear_velocity_ned = env_rot_ned @ linear_velocity_body_frd
+        linear_velocity  = sim_to_normal(linear_velocity_ned)
+        #linear_velocity = state["linear_velocity"].copy()
+        #linear_velocity[2] *= -1.0
+     
 
         forward = env_rot[:, 0].copy()
         forward[2] = 0.0
@@ -954,12 +1106,15 @@ class MavlinkDepthGateRacer:
 
         raw_target_v = target_v_snapshot
         target_source = target_info_snapshot.get("source", "unknown")
-        if raw_target_v is None:
+        gate_cache_used = bool(target_info_snapshot.get("cache_used", False))
+        gate_world_estimate = target_info_snapshot.get("gate_world_estimate")
+        if gate_world_estimate is not None:
+            gate_world_estimate = np.asarray(gate_world_estimate, dtype=np.float32).copy()
+        if raw_target_v is None or self.args.always_world_fallback:
             sim_world_target_delta = self.world_target_v - np.asarray(state["position"], dtype=np.float32)
             env_target_v = sim_to_normal(sim_world_target_delta)
-            env_target_v[1] *= -1.0
             raw_target_v = env_target_v.copy()
-            target_source = "world_fallback"
+            target_source = "world_fallback_forced" if self.args.always_world_fallback else "world_fallback"
             target_info_snapshot = {
                 "source": target_source,
                 "depth_id": None,
@@ -968,9 +1123,22 @@ class MavlinkDepthGateRacer:
             }
             local_target_v = env_target_v @ yaw_only_rot
             target_v_from_local = lambda vec: vec @ yaw_only_rot.T
-        else:
-            env_target_v = env_rot @ raw_target_v
+        elif (
+            target_source == "gate"
+            and gate_cache_used
+            and gate_world_estimate is not None
+        ):
+            current_position = np.asarray(state["position"], dtype=np.float32)
+            sim_gate_delta = (
+                gate_world_estimate - current_position
+            )
+            env_target_v = sim_to_normal(sim_gate_delta)
+            raw_target_v = env_target_v.copy()
+            target_source = "gate_cached_world"
             local_target_v = env_target_v @ yaw_only_rot
+            target_v_from_local = lambda vec: vec @ yaw_only_rot.T
+        else:
+            local_target_v = raw_target_v.copy()
             target_v_from_local = lambda vec: vec @ yaw_only_rot.T
         target_v_norm = np.linalg.norm(local_target_v)
         if target_v_norm > 1e-6:
@@ -985,12 +1153,20 @@ class MavlinkDepthGateRacer:
 
         target_v = target_v_from_local(local_target_v)
         local_velocity = linear_velocity @ yaw_only_rot
+        #local_velocity = linear_velocity.copy()
         state_parts = [local_target_v, env_rot[:, 2], np.array([self.args.margin], dtype=np.float32)]
         if not self.args.no_odom:
             state_parts.insert(0, local_velocity)
         state_tensor = torch.as_tensor(np.concatenate(state_parts), dtype=torch.float32)[None]
 
-        depth_tensor = self.preprocess_depth(self.infinite_depth_like(depth_item["depth"]))
+        if self.args.control_fake_infinite_depth:
+            control_depth = np.full_like(depth_item["depth"], np.inf, dtype=np.float32)
+            depth_input_label = "fake_infinite"
+        else:
+            control_depth = depth_item["depth"]
+            depth_input_label = "actual"
+
+        depth_tensor = self.preprocess_depth(control_depth)
         act, self.hidden = self.model.predict_action(depth_tensor, state_tensor)
         act = yaw_only_rot @ act.reshape(3, -1)
         a_pred = act[:, 0] - act[:, 1]
@@ -1008,15 +1184,31 @@ class MavlinkDepthGateRacer:
 
         if self.args.debug_print:
             print(
-                "[debug]",
-                "depth_input=", "infinite",
+                "[control_input]",
+                "depth_input=", depth_input_label,
+                #"odom_frame_id=", state.get("frame_id"),
+                #"odom_child_frame_id=", state.get("child_frame_id"),
                 "drone_position=", np.round(state["position"], 3),
                 "target_src=", target_source,
-                "attitude_rpy=", np.round(current_rpy, 3),
+                "gate_cache_used=", gate_cache_used,
                 "raw_target_v=", np.round(raw_target_v, 3),
                 "local_target_v=", np.round(local_target_v, 3),
+                "gate_world_est=", None if gate_world_estimate is None else np.round(gate_world_estimate, 3),
+                "linear_velocity_ned=", np.round(linear_velocity_ned, 3),
+                "linear_velocity=", np.round(linear_velocity, 3),
                 "a_pred=", np.round(a_pred, 3),
                 "local_velocity=", np.round(local_velocity, 3),
+                "env_rot", np.round(env_rot, 3),
+                "env_rot_ned", np.round(env_rot_ned, 3),
+                flush=True,
+            )
+
+            print(
+                "[control_output]",
+                "attitude_rpy=", np.round(current_rpy, 3),
+                "target_rpy=", np.round(target_rpy, 3),
+                "error_rpy=", np.round(error_rpy, 3),
+                "command_delta_rpy=", np.round(command_delta_rpy, 3),
                 "thrust=", round(thrust, 3),
                 "throttle=", round(throttle, 3),
                 flush=True,
@@ -1094,147 +1286,7 @@ class MavlinkDepthGateRacer:
             flush=True,
         )
 
-    def update(self):
-        frame = self.data.get("latest_frame")
-        state = self.get_state()
-        if frame is None or state is None:
-            reason = "missing_frame" if frame is None else "missing_state"
-            self.debug_idle(reason, frame=frame, state=state)
-            time.sleep(1.0 / max(self.args.control_hz, 1.0))
-            return
-
-        attitude = self.data.get("attitude")
-        if attitude is None:
-            self.debug_idle("missing_attitude", frame=frame, state=state)
-            time.sleep(1.0 / max(self.args.control_hz, 1.0))
-            return
-
-        frame_id = frame["frame_id"]
-        if frame_id == self.last_frame_id:
-            self.debug_idle("same_frame", frame=frame, state=state)
-            time.sleep(1.0 / max(self.args.control_hz, 1.0))
-            return
-        self.last_frame_id = frame_id
-
-        image_bgr = frame["image_bgr"]
-        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        depth_rgb, gate_transform = self.fit_rgb_for_gate(rgb)
-        gate_bgr, _ = self.fit_rgb_for_gate(image_bgr)
-        depth = self.depth_estimator.predict_depth(depth_rgb)
-        self.save_depth_image(depth, frame_id=frame_id)
-        if self.args.debug_print:
-            print("[depth]", "frame=", frame_id, flush=True)
-        target_v_airsim, aux = self.estimate_gate_target_resized(
-            gate_bgr,
-            depth,
-            transform=gate_transform,
-        )
-        self.aux = aux or {}
-        target_rel_drone = self.aux.get("gate_detection_target_rel_drone", target_v_airsim)
-        if target_rel_drone is None:
-            self.target_v = None
-            target_source = "none"
-        else:
-            self.target_v = airsim_to_normal_vector(target_rel_drone)
-            target_source = "gate"
-        if self.args.debug_print:
-            gate_model_aux = self.aux.get("gate_model_aux", self.aux)
-            gate_center = gate_model_aux.get("gate_center_px") if isinstance(gate_model_aux, dict) else None
-            center_disp = None
-            if gate_center is not None:
-                gate_center = np.asarray(gate_center, dtype=np.float32).reshape(-1)
-                if gate_center.size >= 2:
-                    center_disp = (round(float(gate_center[0]), 3), round(float(gate_center[1]), 3))
-            print(
-                "[gate]",
-                "center=", center_disp,
-                "target_v=", None if self.target_v is None else np.round(self.target_v, 3),
-                flush=True,
-            )
-
-        env_rot_ned = quaternion_to_rotation_matrix(state["orientation"])
-        env_rot = sim_to_normal_rotation(env_rot_ned)
-        linear_velocity = sim_to_normal(state["linear_velocity"])
-
-        forward = env_rot[:, 0].copy()
-        forward[2] = 0.0
-        if np.linalg.norm(forward) < 1e-6:
-            forward = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        forward = normalize(forward)
-        up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        left = normalize(np.cross(up, forward))
-        yaw_only_rot = np.stack([forward, left, up], axis=-1)
-
-        raw_target_v = None if self.target_v is None else np.array(self.target_v, copy=True)
-        if raw_target_v is None:
-            sim_world_target_delta = self.world_target_v - np.asarray(state["position"], dtype=np.float32)
-            env_target_v = sim_to_normal(sim_world_target_delta)
-            env_target_v[1] *= -1.0
-            raw_target_v = env_target_v.copy()
-            target_source = "world_fallback"
-            local_target_v = env_target_v @ yaw_only_rot
-            target_v_from_local = lambda vec: vec @ yaw_only_rot.T
-        else:
-            env_target_v = env_rot @ raw_target_v
-            local_target_v = env_target_v @ yaw_only_rot
-            target_v_from_local = lambda vec: vec @ yaw_only_rot.T
-        target_v_norm = np.linalg.norm(local_target_v)
-        if target_v_norm > 1e-6:
-            if self.args.target_type == "max":
-                local_target_v = (local_target_v / target_v_norm) * self.args.target_speed
-            elif self.args.target_type == "min":
-                local_target_v = (
-                    local_target_v / target_v_norm * min(target_v_norm, self.args.target_speed)
-                )
-        else:
-            local_target_v = np.array([self.args.target_speed, 0.0, 0.0], dtype=np.float32)
-
-        target_v = target_v_from_local(local_target_v)
-        local_velocity = linear_velocity @ yaw_only_rot
-        state_parts = [local_target_v, env_rot[:, 2], np.array([self.args.margin], dtype=np.float32)]
-        if not self.args.no_odom:
-            state_parts.insert(0, local_velocity)
-        state_tensor = torch.as_tensor(np.concatenate(state_parts), dtype=torch.float32)[None]
-
-        depth_tensor = self.preprocess_depth(self.infinite_depth_like(depth))
-        act, self.hidden = self.model.predict_action(depth_tensor, state_tensor)
-        act = yaw_only_rot @ act.reshape(3, -1)
-        a_pred = act[:, 0] - act[:, 1]
-        roll, pitch, yaw, throttle, thrust = self.acceleration_to_attitude_command(
-            a_pred, local_velocity, target_v, env_rot
-        )
-        target_rpy = (roll, pitch, yaw)
-        current_rpy = (
-            float(attitude["roll"]),
-            float(attitude["pitch"]),
-            float(attitude["yaw"]),
-        )
-        error_rpy, command_delta_rpy = self.build_attitude_command(target_rpy, current_rpy)
-        self.send_attitude_command(command_delta_rpy, throttle)
-
-        if self.args.debug_print:
-            print(
-                "[debug]",
-                "depth_input=", "infinite",
-                "drone_position=", np.round(state["position"], 3),
-                "target_src=", target_source,
-                "attitude_rpy=", np.round(current_rpy, 3),
-                "raw_target_v=", np.round(raw_target_v, 3),
-                "local_target_v=", np.round(local_target_v, 3),
-                "a_pred=", np.round(a_pred, 3),
-                "current_velocity=", np.round(local_velocity, 3),
-                "thrust=", round(thrust, 3),
-                "throttle=", round(throttle, 3),
-                flush=True,
-            )
-        self.debug_counter += 1
-
-        self.show_or_save_rgb_overlay(
-            depth_rgb,
-            frame_id=frame_id,
-            aux=self.aux.get("gate_model_aux", self.aux),
-        )
-
+   
 
 def main():
     args = build_args()
@@ -1252,7 +1304,7 @@ def main():
     ts_loop = TimeSync.create_timesync(sim_conn, shared_data)
     vision_rx = VisionRX(shared_data)
     print("Loading depth, gate, and control models...", flush=True)
-    racer = MavlinkDepthGateRacer(sim_conn, shared_data, system_boot_ms, args)
+    racer = DepthGateRacer(sim_conn, shared_data, system_boot_ms, args)
 
     print("Arming drone...", flush=True)
     racer.arm()

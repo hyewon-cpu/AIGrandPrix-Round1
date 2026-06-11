@@ -120,6 +120,9 @@ class GateDetector:
                  camera_fy=None,
                  camera_cx=None,
                  camera_cy=None,
+                 gate_depth_mode="depth_map",
+                 gate_real_width_m=2.7,
+                 gate_real_height_m=2.7,
                  camera_pose=None,
                  load_airsim_camera_settings=True):
         
@@ -172,6 +175,13 @@ class GateDetector:
         self._gate_postproc_debug_counter = 0
         self._gate_select_debug_counter = 0
         self._gate_target_debug_counter= 0
+        self.gate_depth_mode = str(gate_depth_mode)
+        if self.gate_depth_mode not in {"depth_map", "gate_size", "gate_size_fallback"}:
+            raise ValueError(
+                "gate_depth_mode must be one of: depth_map, gate_size, gate_size_fallback"
+            )
+        self.gate_real_width_m = float(gate_real_width_m)
+        self.gate_real_height_m = float(gate_real_height_m)
         self.camera_intrinsics = None
         self.airsim_client_images = None
         
@@ -704,14 +714,36 @@ class GateDetector:
             return np.inf
         return float(np.min(patch))
 
+    def _estimate_depth_from_gate_size(self, rect_w_px, rect_h_px, intr) -> tuple[float, dict]:
+        estimates = []
+        dbg = {
+            "rect_w_px": float(rect_w_px),
+            "rect_h_px": float(rect_h_px),
+            "gate_real_width_m": float(self.gate_real_width_m),
+            "gate_real_height_m": float(self.gate_real_height_m),
+            "depth_from_width_m": None,
+            "depth_from_height_m": None,
+        }
+
+        if rect_w_px > 1e-6 and self.gate_real_width_m > 1e-6:
+            depth_w = float(self.gate_real_width_m) * float(intr["fx"]) / float(rect_w_px)
+            if np.isfinite(depth_w) and depth_w > 1e-6:
+                estimates.append(depth_w)
+                dbg["depth_from_width_m"] = depth_w
+
+        if rect_h_px > 1e-6 and self.gate_real_height_m > 1e-6:
+            depth_h = float(self.gate_real_height_m) * float(intr["fy"]) / float(rect_h_px)
+            if np.isfinite(depth_h) and depth_h > 1e-6:
+                estimates.append(depth_h)
+                dbg["depth_from_height_m"] = depth_h
+
+        if not estimates:
+            return np.inf, dbg
+        return float(np.mean(np.asarray(estimates, dtype=np.float32))), dbg
+
     #calculate target_V in airsim coordinates
     def _gate_target_to_airsim(self, candidate, intr, depth, rgb_width, rgb_height): 
         camera = self.camera_pose
-        settings_path = Path.home() / "Documents" / "AirSim" / "settings.json"
-        if self.load_airsim_camera_settings and airsim is not None and settings_path.exists():
-            with settings_path.open("r") as f:
-                settings = json.load(f)
-            camera = settings["Vehicles"].get(self.drone_name, {}).get("Cameras", {}).get("fpv_cam", camera)
         
         if candidate is None:
             return np.inf, "unavailable", {"reason": "candidate_none"}, None, None
@@ -731,6 +763,8 @@ class GateDetector:
             "center_px": (float(center_u), float(center_v)),
             "corner_depths_m": {},
             "max_corner_pair_diff_m": None,
+            "depth_mode": self.gate_depth_mode,
+            "gate_size_depth": None,
         }
         corner_depths_by_name: dict[str, float] = {}
         points = candidate.get("points", {})
@@ -766,6 +800,22 @@ class GateDetector:
         else:
             depth_m = np.inf
             depth_source = "depth_map_corners_missing"
+
+        gate_size_depth_m, gate_size_dbg = self._estimate_depth_from_gate_size(
+            rect_w_px,
+            rect_h_px,
+            intr,
+        )
+        depth_dbg["gate_size_depth"] = gate_size_dbg
+        if self.gate_depth_mode == "gate_size":
+            depth_m = gate_size_depth_m
+            depth_source = "gate_size"
+        elif (
+            self.gate_depth_mode == "gate_size_fallback"
+            and (not np.isfinite(depth_m) or depth_m <= 1e-6)
+        ):
+            depth_m = gate_size_depth_m
+            depth_source = "gate_size_fallback"
 
         if not np.isfinite(depth_m) or depth_m <= 1e-6:
             depth_dbg["reason"] = depth_source
@@ -814,6 +864,8 @@ class GateDetector:
                     },
                     "depth_m=",
                     round(float(depth_m), 3),
+                    "depth_source=",
+                    depth_source,
                     "offset=",
                     (round(float(x_off), 3), round(float(y_off), 3)),
                     "target_rel_camera=",
@@ -857,6 +909,7 @@ class GateDetector:
                     "gate_depth_source": "cached_primary",
                     "gate_detection_target_cache_used": True,
                     "gate_detection_target_cache_rank": 1,
+                    "gate_detection_target_cache_reason": "rgb_none",
                     "gate_center_px": self.last_selected_gate_center_px,
                     "gate_depth_m": self.last_selected_gate_depth_m,
                     "gate_detection_target_rel_drone" : self.last_corner_target_airsim
@@ -867,6 +920,7 @@ class GateDetector:
                     "gate_depth_source": "cached_secondary",
                     "gate_detection_target_cache_used": True,
                     "gate_detection_target_cache_rank": 2,
+                    "gate_detection_target_cache_reason": "rgb_none",
                     "gate_center_px": self.last_backup_gate_center_px,
                     "gate_depth_m": self.last_backup_gate_depth_m,
                     "gate_detection_target_rel_drone" : self.last_corner_backup_target_airsim,
@@ -895,6 +949,7 @@ class GateDetector:
                     "gate_depth_source": "cached_primary",
                     "gate_detection_target_cache_used": True,
                     "gate_detection_target_cache_rank": 1,
+                    "gate_detection_target_cache_reason": "no_gate_candidates",
                     "gate_center_px": self.last_selected_gate_center_px,
                     "gate_depth_m": self.last_selected_gate_depth_m,
                     "gate_detection_target_rel_drone" : self.last_corner_target_airsim,
@@ -906,6 +961,7 @@ class GateDetector:
                     "gate_depth_source": "cached_secondary",
                     "gate_detection_target_cache_used": True,
                     "gate_detection_target_cache_rank": 2,
+                    "gate_detection_target_cache_reason": "no_gate_candidates",
                     "gate_center_px": self.last_backup_gate_center_px,
                     "gate_depth_m": self.last_backup_gate_depth_m,
                     "gate_detection_target_rel_drone" : self.last_corner_backup_target_airsim,
@@ -1029,6 +1085,7 @@ class GateDetector:
                     "gate_depth_source": "cached_primary",
                     "gate_detection_target_cache_used": True,
                     "gate_detection_target_cache_rank": 1,
+                    "gate_detection_target_cache_reason": "all_candidates_rejected",
                     "gate_center_px": self.last_selected_gate_center_px,
                     "gate_depth_m": self.last_selected_gate_depth_m,
                     "gate_detection_target_rel_drone" : self.last_corner_target_airsim,
@@ -1038,6 +1095,7 @@ class GateDetector:
                     "gate_depth_source": "cached_secondary",
                     "gate_detection_target_cache_used": True,
                     "gate_detection_target_cache_rank": 2,
+                    "gate_detection_target_cache_reason": "all_candidates_rejected",
                     "gate_center_px": self.last_backup_gate_center_px,
                     "gate_depth_m": self.last_backup_gate_depth_m,
                     "gate_detection_target_rel_drone" : self.last_corner_backup_target_airsim,
@@ -1095,6 +1153,7 @@ class GateDetector:
                         "gate_depth_source": "cached_primary_no_allowed_depth",
                         "gate_detection_target_cache_used": True,
                         "gate_detection_target_cache_rank": 1,
+                        "gate_detection_target_cache_reason": "no_candidate_allowed_by_depth_switch",
                         "gate_center_px": self.last_selected_gate_center_px,
                         "gate_depth_m": self.last_selected_gate_depth_m,
                         "segmentation_gate_lock_depth_m": gate_switch_depth_m,
@@ -1107,10 +1166,10 @@ class GateDetector:
         selected_idx, selected = constrained_indexed[0]
         selected_rank = int(selected_idx) + 1
 
-        backup_idx, backup = selected_idx, selected
-        backup_rank = selected_rank
-        if len(constrained_indexed) > 1:
-            backup_idx, backup = constrained_indexed[1]
+        backup_idx, backup = None, None
+        backup_rank = None
+        if len(indexed_targets) > 1:
+            backup_idx, backup = indexed_targets[1]
             backup_rank = int(backup_idx) + 1
 
         candidate = selected["candidate"]
@@ -1118,10 +1177,10 @@ class GateDetector:
         depth_m = float(selected["depth_m"])
         depth_source = str(selected["depth_source"])
 
-        backup_candidate = backup["candidate"]
-        backup_target_rel_drone = backup["target_rel_drone"]
-        backup_depth_m = float(backup["depth_m"])
-        backup_depth_source = str(backup["depth_source"])
+        backup_candidate = None if backup is None else backup["candidate"]
+        backup_target_rel_drone = None if backup is None else backup["target_rel_drone"]
+        backup_depth_m = np.inf if backup is None else float(backup["depth_m"])
+        backup_depth_source = None if backup is None else str(backup["depth_source"])
 
         if self.debug_print:
             self._gate_select_debug_counter += 1
@@ -1157,13 +1216,22 @@ class GateDetector:
         self.last_corner_backup_target_airsim = backup_target_rel_drone
         self.last_corner_candidate_timestamp = time.time()
         self.last_selected_gate_center_px = np.asarray(candidate["center"], dtype=np.float32).copy()
-        self.last_backup_gate_center_px = np.asarray(backup_candidate["center"], dtype=np.float32).copy()
+        self.last_backup_gate_center_px = (
+            None
+            if backup_candidate is None
+            else np.asarray(backup_candidate["center"], dtype=np.float32).copy()
+        )
         self.last_selected_gate_points_px = {
             str(k): np.asarray(v, dtype=np.float32).copy() for k, v in (candidate.get("points", {}) or {}).items()
         }
-        self.last_backup_gate_points_px = {
-            str(k): np.asarray(v, dtype=np.float32).copy() for k, v in (backup_candidate.get("points", {}) or {}).items()
-        }
+        self.last_backup_gate_points_px = (
+            None
+            if backup_candidate is None
+            else {
+                str(k): np.asarray(v, dtype=np.float32).copy()
+                for k, v in (backup_candidate.get("points", {}) or {}).items()
+            }
+        )
         self.last_selected_gate_depth_m = depth_m
         self.last_selected_gate_depth_source = depth_source
         self.last_backup_gate_depth_m = backup_depth_m
@@ -1195,10 +1263,12 @@ class GateDetector:
             "segmentation_gate_selection_mode": selection_mode if "selection_mode" in locals() else "unconstrained",
             "segmentation_target_airsim": target_rel_drone,
             "segmentation_backup_target_airsim": backup_target_rel_drone,
+            "segmentation_primary_target_rel_drone": target_rel_drone,
+            "segmentation_backup_target_rel_drone": backup_target_rel_drone,
             "gate_detection_target_rel_drone": self.last_corner_target_airsim,
-            "segmentation_backup_target_vec_airsim_world": backup.get("target_rel_drone"),
+            "segmentation_backup_target_vec_airsim_world": None if backup is None else backup.get("target_rel_drone"),
             "segmentation_target_rel_camera": selected.get("target_rel_camera"),
-            "segmentation_backup_target_rel_camera": backup.get("target_rel_camera"),
+            "segmentation_backup_target_rel_camera": None if backup is None else backup.get("target_rel_camera"),
             "camera_intrinsics": intr,
             "gate_corner_points_px": candidate["points"],
             "gate_corner_scores": candidate["scores"],
